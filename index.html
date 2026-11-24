@@ -1,0 +1,657 @@
+﻿<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<!-- 外部への通信をブラウザに禁止させる（自分のサーバーのファイルと、ページ内の data:/blob: だけ許可） -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:; style-src 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' data: blob:; worker-src 'self' blob:; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232f3d73'/%3E%3Crect x='11' y='11' width='42' height='42' rx='4' fill='%23d7739a'/%3E%3Ccircle cx='40' cy='25' r='7' fill='%23ffe2a8'/%3E%3Cpath d='M11 45l13-16 11 12 7-7 11 11v8H11z' fill='%2324365a'/%3E%3Cpath d='M32 11v42M11 32h42' stroke='%23fff' stroke-width='4'/%3E%3Crect x='11' y='11' width='42' height='42' rx='4' fill='none' stroke='%23fff' stroke-width='6'/%3E%3C/svg%3E">
+<title>のぞき窓</title>
+<style>
+  /* 画面全体が窓。操作パネルは左上に小さく置く */
+  :root {
+    --bg: #0b0c10;
+    --panel: rgba(18, 20, 28, .78);
+    --line: rgba(255, 255, 255, .14);
+    --fg: #eceef4;
+    --dim: #9aa0b4;
+    --accent: #ffb86b;
+    --font: "Yu Gothic UI", "Hiragino Sans", "Meiryo", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font-family: var(--font); overflow: hidden; }
+  canvas#view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #panel {
+    position: fixed; top: 12px; left: 12px; width: min(300px, calc(100vw - 24px));
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    backdrop-filter: blur(10px); padding: 14px; display: grid; gap: 12px;
+    max-height: calc(100vh - 24px); overflow: auto;
+  }
+  #panel.min > :not(header) { display: none; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  h1 { font-size: 16px; margin: 0; letter-spacing: .12em; }
+  #status { margin: 0; font-size: 12px; line-height: 1.6; color: var(--dim); min-height: 3.2em; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  button, .btn {
+    font: inherit; font-size: 13px; color: var(--fg); background: rgba(255,255,255,.07);
+    border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; cursor: pointer;
+  }
+  button:hover, .btn:hover { background: rgba(255,255,255,.14); }
+  button.primary { background: var(--accent); color: #231606; border-color: transparent; font-weight: 700; }
+  button.primary:hover { background: #ffc78a; }
+  button:disabled { opacity: .5; cursor: default; }
+  button:focus-visible, .btn:focus-within, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  label.s { display: grid; gap: 4px; font-size: 12px; color: var(--dim); }
+  label.s span { display: flex; justify-content: space-between; }
+  label.s output { color: var(--fg); font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  select { font: inherit; font-size: 13px; color: var(--fg); background: rgba(255,255,255,.07); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+  select option { color: #111; }
+  [hidden] { display: none !important; }
+  #dropperBox { display: grid; gap: 8px; }
+  .sw { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--line); }
+  .sw.pend { border: 2px dashed var(--accent); }
+  #swatches { min-height: 22px; }
+  label.chk { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--dim); }
+  #cam { position: fixed; right: 12px; bottom: 12px; width: 160px; border-radius: 8px; border: 1px solid var(--line); transform: scaleX(-1); opacity: .85; }
+  #cam[hidden] { display: none; }
+  #drop { position: fixed; inset: 0; display: none; place-items: center; background: rgba(11,12,16,.7); font-size: 22px; letter-spacing: .1em; border: 3px dashed var(--accent); }
+  #drop.on { display: grid; }
+  .hint { font-size: 11px; color: var(--dim); margin: 0; line-height: 1.6; }
+  @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto; } }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+
+<aside id="panel">
+  <header>
+    <h1>のぞき窓</h1>
+    <button id="minBtn" type="button" aria-label="パネルを畳む">畳む</button>
+  </header>
+  <p id="status" role="status" aria-live="polite">マウスを動かすと奥行きが変わります。カメラで追跡を始めると、頭の動きに合わせて見えます。</p>
+  <div class="row">
+    <label class="btn">写真を選ぶ<input type="file" id="file" accept="image/*" hidden></label>
+    <button id="camBtn" type="button" class="primary">カメラで追跡</button>
+    <button id="centerBtn" type="button" disabled title="Cキーでも実行">リセンター</button>
+  </div>
+  <label class="s" for="depth"><span>奥行き<output id="depthO">12 cm</output></span>
+    <input id="depth" type="range" min="2" max="60" step="1" value="20"></label>
+  <label class="s" for="screenW"><span>画面の横幅<output id="screenWO">34 cm</output></span>
+    <input id="screenW" type="range" min="15" max="80" step="1" value="34"></label>
+  <label class="s" for="zoom"><span>画像の大きさ<output id="zoomO">100%</output></span>
+    <input id="zoom" type="range" min="0.4" max="2" step="0.05" value="1"></label>
+  <label class="s" for="gain"><span>動きの大きさ<output id="gainO">1.0</output></span>
+    <input id="gain" type="range" min="0.5" max="5" step="0.1" value="2"></label>
+  <label class="s" for="holeMode"><span>穴の部分の色</span>
+    <select id="holeMode">
+      <option value="blur" selected>ぼかした写真</option>
+      <option value="black">黒</option>
+      <option value="dropper">スポイト</option>
+    </select></label>
+  <div id="dropperBox" hidden>
+    <p class="hint" id="dropperHint">始点: 色を取る写真上の場所をクリック</p>
+    <div id="swatches" class="row"></div>
+    <div class="row"><button id="dUndo" type="button">やり直し</button><button id="dClear" type="button">全消去</button></div>
+  </div>
+  <p class="hint" id="trackInfo" aria-live="off">追跡: 停止中</p>
+  <label class="chk" for="showCam"><input type="checkbox" id="showCam" checked>カメラ映像を表示</label>
+  <div class="row"><button id="fsBtn" type="button">全画面</button><button id="demoBtn" type="button">サンプルに戻す</button></div>
+  <p class="hint">画面の横幅は実寸に近づけるほど立体感が正確になります。写真はドラッグ＆ドロップでも読み込めます。Hキーでパネルの表示を切り替え。</p>
+</aside>
+
+<video id="cam" playsinline muted hidden></video>
+<div id="drop">写真をドロップ</div>
+
+<script src="vendor/three.min.js"></script>
+<script>
+(() => {
+  'use strict';
+  // 他のサイトとの通信なし: ライブラリとモデルはすべて同じサイトの vendor/ に置いてある
+  const abs = p => new URL(p, location.href).href;
+  const TF_URL = abs('vendor/transformers.min.js');
+  const DEPTH_MODEL = 'onnx-community/depth-anything-v2-small';
+  const MP_URL = abs('vendor/mp/vision_bundle.mjs');
+  const MP_WASM = abs('vendor/mp/wasm');
+  const FACE_MODEL = abs('vendor/mp/face_landmarker.task');
+  const GRID = 240;          // メッシュ分割数
+  const EYE_GAP_CM = 6.3;    // 平均的な瞳孔間距離
+  const CAM_HFOV = 63;       // ウェブカメラの水平画角(度)の仮定
+
+  const $ = id => document.getElementById(id);
+  const statusEl = $('status');
+  const setStatus = t => { statusEl.textContent = t; };
+
+  /* ---------- 状態 ---------- */
+  const st = { D: 20, W: 34, gain: 2, zoom: 1, mode: 'mouse', imgAspect: 1.6 };
+  const head = { x: 0, y: 0, z: 55 };      // 描画に使う（平滑化後）
+  const target = { x: 0, y: 0, z: 55 };    // 検出した生の位置
+  let lastFace = 0;
+  const center = { x: 0, y: 0 };            // 「正面」とみなす頭の位置（リセンターで設定）
+
+  /* ---------- Three.js ---------- */
+  const canvas = $('view');
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setClearColor(0x0b0c10);
+  const scene = new THREE.Scene();
+  const cam = new THREE.PerspectiveCamera();
+
+  const colorTex = new THREE.Texture();
+  const depthTex = new THREE.DataTexture(new Uint8Array([178, 178, 178, 255]), 1, 1, THREE.RGBAFormat);
+  [colorTex, depthTex].forEach(t => { t.minFilter = THREE.LinearFilter; t.magFilter = THREE.LinearFilter; t.generateMipmaps = false; });
+
+  const mat = new THREE.ShaderMaterial({
+    side: THREE.DoubleSide,
+    uniforms: {
+      uMap: { value: colorTex }, uDepth: { value: depthTex },
+      uD: { value: st.D }, uStep: { value: new THREE.Vector2(1 / GRID, 1 / GRID) }, uEdge: { value: 0.28 }
+    },
+    vertexShader: `
+      uniform sampler2D uDepth; uniform float uD; uniform vec2 uStep;
+      varying vec2 vUv; varying float vEdge;
+      float dep(vec2 p){ return texture2D(uDepth, p).r; }
+      void main(){
+        vUv = uv;
+        float d = dep(uv);
+        float a = dep(uv + vec2(uStep.x, 0.)), b = dep(uv - vec2(uStep.x, 0.));
+        float c = dep(uv + vec2(0., uStep.y)), e = dep(uv - vec2(0., uStep.y));
+        vEdge = max(max(abs(a-d), abs(b-d)), max(abs(c-d), abs(e-d)));
+        vec3 p = position;
+        p.z = uD * (d - 0.7);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.);
+      }`,
+    fragmentShader: `
+      uniform sampler2D uMap; uniform float uEdge;
+      varying vec2 vUv; varying float vEdge;
+      void main(){
+        if (vEdge > uEdge) discard;
+        gl_FragColor = texture2D(uMap, vUv);
+      }`
+  });
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1, GRID, GRID), mat);
+  mesh.frustumCulled = false;
+  scene.add(mesh);
+
+  // 手前の物がずれて穴が開いた部分に、ぼかした写真の色を見せる背景板
+  const bgMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+  bgMesh.frustumCulled = false;
+  scene.add(bgMesh);
+
+  /* ---------- スポイト: 写真の色(始点)を穴の位置(終点)に置く ---------- */
+  const dropper = { pairs: [], pending: null, blurTex: null, fieldTex: null, src: null };
+  let depthCPU = { data: new Float32Array([0.7]), w: 1, h: 1 };
+
+  function applyHole() {
+    const mode = $('holeMode').value;
+    bgMesh.visible = mode !== 'black';
+    bgMesh.material.map = (mode === 'dropper' && dropper.fieldTex) ? dropper.fieldTex : dropper.blurTex;
+    canvas.style.cursor = mode === 'dropper' ? 'crosshair' : '';
+  }
+
+  // 終点が1つなら一面その色、2つ以上なら距離に応じたグラデーション(逆距離加重)
+  function rebuildField() {
+    if (dropper.fieldTex) { dropper.fieldTex.dispose(); dropper.fieldTex = null; }
+    if (dropper.pairs.length) {
+      const w = 96, h = Math.max(1, Math.round(96 / st.imgAspect));
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      const x = c.getContext('2d'), img = x.createImageData(w, h);
+      for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) {
+        const u = (i + 0.5) / w, v = 1 - (j + 0.5) / h;
+        let sw = 0, r = 0, g = 0, b = 0;
+        for (const p of dropper.pairs) {
+          const dx = (u - p.u) * st.imgAspect, dy = v - p.v, k = 1 / (dx * dx + dy * dy + 0.002);
+          sw += k; r += p.c[0] * k; g += p.c[1] * k; b += p.c[2] * k;
+        }
+        const o = (j * w + i) * 4;
+        img.data[o] = r / sw; img.data[o + 1] = g / sw; img.data[o + 2] = b / sw; img.data[o + 3] = 255;
+      }
+      x.putImageData(img, 0, 0);
+      const t = new THREE.Texture(c);
+      t.minFilter = THREE.LinearFilter; t.magFilter = THREE.LinearFilter; t.generateMipmaps = false; t.needsUpdate = true;
+      dropper.fieldTex = t;
+    }
+    applyHole();
+  }
+
+  function sampleColor(u, v) {   // 写真の(u,v)付近5x5画素の平均色
+    const s = dropper.src, w = s.width, h = s.height;
+    const px = Math.min(w - 5, Math.max(0, Math.floor(u * w) - 2)), py = Math.min(h - 5, Math.max(0, Math.floor((1 - v) * h) - 2));
+    const d = s.getContext('2d').getImageData(px, py, 5, 5).data;
+    let r = 0, g = 0, b = 0;
+    for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2]; }
+    const n = d.length / 4;
+    return [r / n, g / n, b / n];
+  }
+
+  // 画面上の点(窓座標cm)から頭へ向かう視線が、手前の面(穴を除く)に当たる位置
+  function pickFront(sx, sy) {
+    const { data, w, h } = depthCPU, D = st.D;
+    const at = (u, v) => data[Math.min(h - 1, Math.max(0, Math.round((1 - v) * (h - 1)))) * w + Math.min(w - 1, Math.max(0, Math.round(u * (w - 1))))];
+    for (let n = 0; n <= 400; n++) {
+      const z = 0.3 * D - n / 400 * D, s = (head.z - z) / head.z;
+      const x = head.x + (sx - head.x) * s, y = head.y + (sy - head.y) * s;
+      const u = x / mesh.scale.x + 0.5, v = y / mesh.scale.y + 0.5;
+      if (u < 0 || u > 1 || v < 0 || v > 1) continue;
+      const d = at(u, v), e = 1 / GRID;
+      const edge = Math.max(Math.abs(at(u + e, v) - d), Math.abs(at(u - e, v) - d), Math.abs(at(u, v + e) - d), Math.abs(at(u, v - e) - d));
+      if (edge > mat.uniforms.uEdge.value) continue;
+      if (z <= D * (d - 0.7)) return { u, v };
+    }
+    return null;
+  }
+  function pickBack(sx, sy) {
+    const z = bgMesh.position.z, s = (head.z - z) / head.z;
+    const u = (head.x + (sx - head.x) * s) / bgMesh.scale.x + 0.5, v = (head.y + (sy - head.y) * s) / bgMesh.scale.y + 0.5;
+    return (u < 0 || u > 1 || v < 0 || v > 1) ? null : { u, v };
+  }
+
+  function renderDropper() {
+    const on = $('holeMode').value === 'dropper';
+    $('dropperBox').hidden = !on;
+    const box = $('swatches'); box.textContent = '';
+    const sw = (c, pend) => { const s = document.createElement('span'); s.className = 'sw' + (pend ? ' pend' : ''); s.style.background = `rgb(${c.map(Math.round)})`; box.appendChild(s); };
+    dropper.pairs.forEach(p => sw(p.c, false));
+    if (dropper.pending) sw(dropper.pending.c, true);
+    $('dropperHint').textContent = dropper.pending
+      ? '終点: 色を付けたい穴の場所をクリック（頭を動かして穴を開けてから）'
+      : '始点: 色を取る写真上の場所をクリック';
+  }
+
+  let W = 34, H = 20;
+  function layout() {
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(innerWidth, innerHeight, false);
+    W = st.W; H = W * innerHeight / innerWidth;
+    const sa = W / H, ia = st.imgAspect;
+    let w, h;
+    if (ia > sa) { h = H; w = H * ia; } else { w = W; h = W / ia; }
+    const m = (55 + 0.7 * st.D) / 55 * 1.12;   // 奥へ引いた分と動いた分の余白
+    mesh.scale.set(w * m * st.zoom, h * m * st.zoom, 1);
+    bgMesh.scale.copy(mesh.scale);
+    bgMesh.position.z = -0.72 * st.D;
+    mat.uniforms.uD.value = st.D;
+  }
+
+  function render() {
+    // 画面を「窓」とみなし、頭の位置から見た非対称な視錐台を作る
+    const n = 1, f = 2000, k = n / head.z;
+    cam.position.set(head.x, head.y, head.z);
+    cam.updateMatrixWorld();
+    cam.projectionMatrix.makePerspective(
+      (-W / 2 - head.x) * k, (W / 2 - head.x) * k, (H / 2 - head.y) * k, (-H / 2 - head.y) * k, n, f);
+    cam.projectionMatrixInverse.copy(cam.projectionMatrix).invert();
+    renderer.render(scene, cam);
+  }
+
+  /* ---------- 画像と深度 ---------- */
+  function setImage(colorCanvas) {
+    // 画像サイズが変わると既存テクスチャは更新できないため、毎回作り直す
+    const t = new THREE.Texture(colorCanvas);
+    t.minFilter = THREE.LinearFilter; t.magFilter = THREE.LinearFilter; t.generateMipmaps = false;
+    t.needsUpdate = true;
+    const old = mat.uniforms.uMap.value;
+    mat.uniforms.uMap.value = t;
+    old.dispose();
+    // 背景板: 小さく縮めてぼかした写真（拡大時の補間でさらに滑らかになる）
+    const bw = 48, bh = Math.max(1, Math.round(48 * colorCanvas.height / colorCanvas.width));
+    const bc = document.createElement('canvas'); bc.width = bw; bc.height = bh;
+    const bx = bc.getContext('2d'); bx.filter = 'blur(2px)'; bx.drawImage(colorCanvas, 0, 0, bw, bh);
+    const bt = new THREE.Texture(bc); bt.minFilter = THREE.LinearFilter; bt.magFilter = THREE.LinearFilter; bt.generateMipmaps = false; bt.needsUpdate = true;
+    if (dropper.blurTex) dropper.blurTex.dispose();
+    dropper.blurTex = bt; dropper.src = colorCanvas;
+    dropper.pairs.length = 0; dropper.pending = null;
+    bgMesh.material.needsUpdate = true;
+    rebuildField(); renderDropper();
+    st.imgAspect = colorCanvas.width / colorCanvas.height;
+    layout();
+  }
+
+  function setDepth(values, w, h) {          // values: 0..1 (大きいほど手前), 画像の上から下の順
+    const data = new Uint8Array(w * h * 4);
+    for (let y = 0; y < h; y++) {
+      const dst = (h - 1 - y) * w;
+      for (let x = 0; x < w; x++) {
+        const v = Math.max(0, Math.min(255, Math.round(values[y * w + x] * 255)));
+        const o = (dst + x) * 4;
+        data[o] = data[o + 1] = data[o + 2] = v; data[o + 3] = 255;
+      }
+    }
+    const t = new THREE.DataTexture(data, w, h, THREE.RGBAFormat);
+    t.minFilter = THREE.LinearFilter; t.magFilter = THREE.LinearFilter; t.generateMipmaps = false;
+    t.needsUpdate = true;
+    depthCPU = { data: values, w, h };
+    const old = mat.uniforms.uDepth.value;
+    mat.uniforms.uDepth.value = t;
+    old.dispose();
+  }
+
+  function boxBlur(src, w, h, r) {
+    const tmp = new Float32Array(src.length), out = new Float32Array(src.length);
+    for (let y = 0; y < h; y++) {
+      let acc = 0, cnt = 0;
+      for (let x = -r; x <= r; x++) { if (x >= 0 && x < w) { acc += src[y * w + x]; cnt++; } }
+      for (let x = 0; x < w; x++) {
+        tmp[y * w + x] = acc / cnt;
+        const a = x - r, b = x + r + 1;
+        if (a >= 0) { acc -= src[y * w + a]; cnt--; }
+        if (b < w) { acc += src[y * w + b]; cnt++; }
+      }
+    }
+    for (let x = 0; x < w; x++) {
+      let acc = 0, cnt = 0;
+      for (let y = -r; y <= r; y++) { if (y >= 0 && y < h) { acc += tmp[y * w + x]; cnt++; } }
+      for (let y = 0; y < h; y++) {
+        out[y * w + x] = acc / cnt;
+        const a = y - r, b = y + r + 1;
+        if (a >= 0) { acc -= tmp[a * w + x]; cnt--; }
+        if (b < h) { acc += tmp[b * w + x]; cnt++; }
+      }
+    }
+    return out;
+  }
+
+  // 8bitの深度(大きいほど手前)を 2%〜98% で正規化して 0..1 にする
+  function normalizeDepth(u8, w, h) {
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < u8.length; i++) hist[u8[i]]++;
+    const total = u8.length;
+    let acc = 0, lo = 0, hi = 255;
+    for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc >= total * 0.02) { lo = i; break; } }
+    acc = 0;
+    for (let i = 255; i >= 0; i--) { acc += hist[i]; if (acc >= total * 0.02) { hi = i; break; } }
+    const span = Math.max(1, hi - lo);
+    const f = new Float32Array(u8.length);
+    for (let i = 0; i < f.length; i++) f[i] = Math.min(1, Math.max(0, (u8[i] - lo) / span));
+    const blurred = boxBlur(boxBlur(f, w, h, 2), w, h, 1);
+    setDepth(blurred, w, h);
+  }
+
+  /* ---------- 深度推定(Depth Anything V2) ---------- */
+  let depthPipe = null;
+  async function estimateDepth(srcCanvas) {
+    try {
+      if (!depthPipe) {
+        setStatus('深度推定モデルを読み込み中…（初回は約120MB。写真は送信されません）');
+        const T = await import(TF_URL);
+        T.env.allowRemoteModels = false;
+        T.env.allowLocalModels = true;
+        T.env.localModelPath = abs('vendor/models/');
+        T.env.backends.onnx.wasm.wasmPaths = abs('vendor/ort/');
+        const progress = p => {
+          if (p.status === 'progress' && p.file && p.file.endsWith('.onnx')) setStatus(`深度推定モデルを読み込み中… ${Math.round(p.progress)}%`);
+        };
+        try {
+          if (!navigator.gpu) throw new Error('no webgpu');
+          depthPipe = await T.pipeline('depth-estimation', DEPTH_MODEL, { device: 'webgpu', progress_callback: progress });
+        } catch (e) {
+          depthPipe = await T.pipeline('depth-estimation', DEPTH_MODEL, { progress_callback: progress });
+        }
+      }
+      setStatus('写真の奥行きを推定中…');
+      const out = await depthPipe(srcCanvas.toDataURL('image/jpeg', 0.92));
+      const d = out.depth;
+      normalizeDepth(d.data, d.width, d.height);
+      setStatus(st.mode === 'camera' ? '顔を追跡中。頭を動かしてのぞき込んでみてください。' : '奥行きを推定しました。マウスを動かして確認できます。');
+    } catch (err) {
+      console.error(err);
+      setStatus('奥行きの推定に失敗しました（通信状態またはブラウザの対応を確認してください）。簡易的な奥行きで表示します。');
+      fallbackDepth(srcCanvas);
+    }
+  }
+
+  // モデルが使えない時の代用: 画像の下ほど手前、明るいほど奥とみなす
+  function fallbackDepth(c) {
+    const w = 160, h = Math.max(1, Math.round(160 / (c.width / c.height)));
+    const t = document.createElement('canvas'); t.width = w; t.height = h;
+    const x = t.getContext('2d'); x.drawImage(c, 0, 0, w, h);
+    const px = x.getImageData(0, 0, w, h).data, u8 = new Uint8Array(w * h);
+    for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) {
+      const o = (j * w + i) * 4, lum = (px[o] * .3 + px[o + 1] * .59 + px[o + 2] * .11) / 255;
+      u8[j * w + i] = Math.round(255 * (0.6 * (j / h) + 0.4 * (1 - lum)));
+    }
+    normalizeDepth(u8, w, h);
+  }
+
+  /* ---------- 写真の読み込み ---------- */
+  function loadFile(file) {
+    if (!file || !file.type.startsWith('image/')) return;
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const s = Math.min(1, 1400 / Math.max(img.naturalWidth, img.naturalHeight));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.naturalWidth * s); c.height = Math.round(img.naturalHeight * s);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      setDepth(new Float32Array([0.7]), 1, 1);   // 推定が終わるまで平面
+      setImage(c);
+      estimateDepth(c);
+    };
+    img.onerror = () => setStatus('この画像は読み込めませんでした。');
+    img.src = url;
+  }
+
+  /* ---------- サンプル画像(夕暮れの山並み) ---------- */
+  function makeDemo() {
+    const w = 1280, h = 800;
+    const mk = () => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };
+    const col = mk(), dep = mk(), cx = col.getContext('2d'), dx = dep.getContext('2d');
+    let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    const g = v => { const n = Math.round(v * 255); return `rgb(${n},${n},${n})`; };
+
+    const sky = cx.createLinearGradient(0, 0, 0, h * .7);
+    sky.addColorStop(0, '#2f3d73'); sky.addColorStop(.55, '#d7739a'); sky.addColorStop(1, '#ffc58a');
+    cx.fillStyle = sky; cx.fillRect(0, 0, w, h);
+    dx.fillStyle = g(0.04); dx.fillRect(0, 0, w, h);
+
+    const layer = (colorStyle, dTop, dBot, y0, pathFn) => {
+      cx.fillStyle = colorStyle; cx.beginPath(); pathFn(cx); cx.fill();
+      const gr = dx.createLinearGradient(0, y0, 0, h); gr.addColorStop(0, g(dTop)); gr.addColorStop(1, g(dBot));
+      dx.fillStyle = gr; dx.beginPath(); pathFn(dx); dx.fill();
+    };
+    const ridge = (base, amp, f1, f2, ph) => x => base - amp * (0.6 * Math.sin(x * f1 + ph) + 0.4 * Math.sin(x * f2 + ph * 2.3) * Math.sin(x * f1 * .37 + ph));
+    const area = fn => c => { c.moveTo(0, h); for (let x = 0; x <= w; x += 8) c.lineTo(x, fn(x)); c.lineTo(w, h); c.closePath(); };
+
+    // 太陽
+    cx.fillStyle = '#fff1c9'; cx.beginPath(); cx.arc(900, 330, 70, 0, 7); cx.fill();
+    dx.fillStyle = g(0.06); dx.beginPath(); dx.arc(900, 330, 70, 0, 7); dx.fill();
+
+    const r1 = ridge(380, 90, .006, .017, 1.1), r2 = ridge(470, 80, .008, .021, 3.4), r3 = ridge(570, 55, .006, .015, 5.2);
+    layer('#9a7fb0', .12, .18, 280, area(r1));
+    layer('#6d5d96', .22, .3, 380, area(r2));
+    layer('#3f4a7a', .36, .5, 500, area(r3));
+
+    // 湖
+    const lake = cx.createLinearGradient(0, 600, 0, 700); lake.addColorStop(0, '#f2a98b'); lake.addColorStop(1, '#6f6aa3');
+    layer(lake, .5, .56, 600, c => { c.rect(0, 600, w, 110); });
+
+    // 木々
+    const tree = (c, x, base, size) => {
+      for (let i = 0; i < 4; i++) {
+        const t = base - size * (0.28 * i), wd = size * (0.5 - i * 0.08);
+        c.moveTo(x, t - size * 0.55); c.lineTo(x - wd, t); c.lineTo(x + wd, t); c.closePath();
+      }
+    };
+    const forest = (colorStyle, depthV, base, size, step) => {
+      const xs = []; for (let x = -20; x < w + 40; x += step) xs.push([x + rnd() * step * .6, size * (.7 + rnd() * .6)]);
+      layer(colorStyle, depthV, depthV, base - size, c => { xs.forEach(([x, s]) => tree(c, x, base, s)); c.rect(0, base, w, h - base); });
+    };
+    forest('#24365a', .6, 700, 80, 46);
+    forest('#182645', .72, 760, 120, 85);
+
+    // 手前の大きな木(左右) と草
+    layer('#0e1730', .86, .9, 100, c => { tree(c, 120, 800, 430); tree(c, 190, 810, 300); });
+    layer('#0e1730', .84, .88, 100, c => { tree(c, 1130, 800, 470); tree(c, 1060, 810, 260); });
+    layer('#0a1124', .9, 1, 720, c => { c.moveTo(0, h); for (let x = 0; x <= w; x += 6) c.lineTo(x, 760 + 20 * Math.sin(x * .05) + rnd() * 18); c.lineTo(w, h); c.closePath(); });
+
+    // 手前に立つ旗(ひとつだけ飛び出す物)
+    layer('#ffb86b', .97, .97, 560, c => { c.moveTo(640, 800); c.lineTo(650, 560); c.lineTo(740, 585); c.lineTo(650, 612); c.lineTo(660, 800); c.closePath(); });
+
+    const d8 = dx.getImageData(0, 0, w, h).data, f = new Float32Array(w * h);
+    for (let i = 0; i < f.length; i++) f[i] = d8[i * 4] / 255;
+    return { col, depth: boxBlur(f, w, h, 1), w, h };
+  }
+
+  function loadDemo() {
+    const demo = makeDemo();
+    setDepth(demo.depth, demo.w, demo.h);
+    setImage(demo.col);
+  }
+
+  /* ---------- 頭の位置を決める ---------- */
+  function onPointer(e) {
+    if (st.mode !== 'mouse') return;
+    const nx = e.clientX / innerWidth - 0.5, ny = e.clientY / innerHeight - 0.5;
+    target.x = nx * W * 0.9; target.y = -ny * H * 0.9; target.z = 55;
+  }
+  addEventListener('pointermove', onPointer);
+
+  const video = $('cam');
+  let landmarker = null, lastVideoT = -1, frames = 0;
+
+  async function startCamera() {
+    const btn = $('camBtn'); btn.disabled = true;
+    try {
+      setStatus('カメラの使用を許可してください…');
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: 'user' }, audio: false });
+      video.srcObject = stream; await video.play();
+      video.hidden = !$('showCam').checked;
+      setStatus('顔の検出モデルを読み込み中…');
+      const V = await import(MP_URL);
+      const fileset = await V.FilesetResolver.forVisionTasks(MP_WASM);
+      const opts = d => ({ baseOptions: { modelAssetPath: FACE_MODEL, delegate: d }, runningMode: 'VIDEO', numFaces: 1 });
+      landmarker = await V.FaceLandmarker.createFromOptions(fileset, opts('CPU'));
+      st.mode = 'camera'; $('centerBtn').disabled = false;
+      btn.textContent = 'マウスに戻す'; btn.disabled = false; btn.onclick = stopCamera;
+      setStatus('顔を探しています。画面から50cmほど離れて、正面を向いてください。');
+    } catch (err) {
+      console.error(err);
+      releaseCamera();   // 許可のあとで失敗したとき、カメラをつけたままにしない
+      btn.disabled = false;
+      const why = `${(err && err.name) || 'Error'}: ${(err && err.message) || err}`;
+      const known = { NotAllowedError: 'カメラが許可されていません。アドレスバーのカメラ表示から許可してください。', NotFoundError: 'カメラが見つかりません。', NotReadableError: 'カメラを別のアプリが使用中です。そのアプリを閉じてください。' };
+      setStatus(`${known[err && err.name] || 'カメラまたは顔検出を開始できませんでした。'}（${why}）`);
+    }
+  }
+  function releaseCamera() {
+    if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
+    video.srcObject = null; video.hidden = true;
+  }
+  function recenter() {
+    if (st.mode !== 'camera' || performance.now() - lastFace > 1200) { setStatus('顔を追跡している間だけリセンターできます。'); return; }
+    center.x = target.x; center.y = target.y;
+    setStatus('いまの頭の位置を正面にしました。');
+  }
+  $('centerBtn').onclick = recenter;
+  addEventListener('keydown', e => { if (e.key === 'c' || e.key === 'C') recenter(); });
+
+  function stopCamera() {
+    st.mode = 'mouse'; center.x = center.y = 0; $('centerBtn').disabled = true;
+    releaseCamera();
+    const btn = $('camBtn'); btn.textContent = 'カメラで追跡'; btn.onclick = startCamera;
+    setStatus('マウスで視点を動かします。');
+  }
+  $('camBtn').onclick = startCamera;
+
+  function trackFace(now) {
+    if (st.mode !== 'camera' || !landmarker || video.readyState < 2 || video.currentTime === lastVideoT) return;
+    lastVideoT = video.currentTime;
+    const res = landmarker.detectForVideo(video, now);
+    const lm = res.faceLandmarks && res.faceLandmarks[0];
+    frames++;
+    if (!lm) {
+      $('trackInfo').textContent = `追跡: 顔なし（検出${frames}回）`;
+      if (now - lastFace > 1200) { target.x = 0; target.y = 0; target.z = 55; setStatus('顔が見つかりません。カメラに顔を向けてください。'); }
+      return;
+    }
+    if (now - lastFace > 1200) setStatus('顔を追跡中。頭を動かしてのぞき込んでみてください。');
+    lastFace = now;
+    const L = lm[468] || lm[33], R = lm[473] || lm[263];
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const gap = Math.hypot((R.x - L.x) * vw, (R.y - L.y) * vh);
+    if (gap < 4) return;
+    const gapCm = lm[468] ? EYE_GAP_CM : 9.0;
+    const fpx = (vw / 2) / Math.tan(CAM_HFOV * Math.PI / 360);
+    const dist = Math.min(120, Math.max(25, fpx * gapCm / gap));
+    const cxn = (L.x + R.x) / 2 - 0.5, cyn = (L.y + R.y) / 2 - 0.5;
+    // 生のカメラ映像は左右が逆。カメラは画面上辺の中央にあると仮定する
+    target.x = -(cxn * vw) / fpx * dist;
+    target.y = H / 2 - (cyn * vh) / fpx * dist;
+    target.z = dist;
+    $('trackInfo').textContent = `追跡: 顔あり 横${target.x.toFixed(1)}cm 縦${target.y.toFixed(1)}cm 距離${dist.toFixed(0)}cm（検出${frames}回）`;
+  }
+
+  function smooth() {
+    const g = st.mode === 'camera' ? st.gain : 1;
+    const tx = (target.x - center.x) * g, ty = (target.y - center.y) * g, tz = target.z;
+    const a = (d) => Math.min(0.85, 0.22 + Math.abs(d) * 0.04);
+    head.x += (tx - head.x) * a(tx - head.x);
+    head.y += (ty - head.y) * a(ty - head.y);
+    head.z += (tz - head.z) * 0.15;
+  }
+
+  /* ---------- UI ---------- */
+  function bindSlider(id, key, fmt) {
+    const el = $(id), out = $(id + 'O');
+    const apply = () => { st[key] = parseFloat(el.value); out.textContent = fmt(st[key]); layout(); };
+    el.addEventListener('input', apply); apply();
+  }
+  bindSlider('depth', 'D', v => v + ' cm');
+  bindSlider('screenW', 'W', v => v + ' cm');
+  bindSlider('gain', 'gain', v => v.toFixed(1));
+  bindSlider('zoom', 'zoom', v => Math.round(v * 100) + '%');
+
+  $('holeMode').addEventListener('change', () => { dropper.pending = null; applyHole(); renderDropper(); });
+  canvas.addEventListener('pointerdown', e => {
+    if ($('holeMode').value !== 'dropper') return;
+    const sx = (e.clientX / innerWidth - 0.5) * W, sy = (0.5 - e.clientY / innerHeight) * H;
+    if (!dropper.pending) {
+      const hit = pickFront(sx, sy);
+      if (!hit) { setStatus('写真の上をクリックしてください。'); return; }
+      dropper.pending = { c: sampleColor(hit.u, hit.v) };
+      setStatus('始点の色を取りました。次に、色を付けたい穴をクリックしてください。');
+    } else {
+      const hit = pickBack(sx, sy);
+      if (!hit) { setStatus('穴の位置が写真の外です。写真の範囲内をクリックしてください。'); return; }
+      dropper.pairs.push({ c: dropper.pending.c, u: hit.u, v: hit.v });
+      dropper.pending = null;
+      rebuildField();
+      setStatus(`色を置きました（${dropper.pairs.length}組）。続けて始点を選べます。`);
+    }
+    renderDropper();
+  });
+  $('dUndo').onclick = () => { if (dropper.pending) dropper.pending = null; else dropper.pairs.pop(); rebuildField(); renderDropper(); };
+  $('dClear').onclick = () => { dropper.pairs.length = 0; dropper.pending = null; rebuildField(); renderDropper(); };
+  $('file').addEventListener('change', e => loadFile(e.target.files[0]));
+  $('demoBtn').onclick = () => { loadDemo(); setStatus('サンプル画像に戻しました。'); };
+  $('fsBtn').onclick = () => { (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen()).catch(() => {}); };
+  $('showCam').onchange = e => { video.hidden = !e.target.checked || !video.srcObject; };
+  const panel = $('panel'), minBtn = $('minBtn');
+  const togglePanel = () => { panel.classList.toggle('min'); minBtn.textContent = panel.classList.contains('min') ? '開く' : '畳む'; };
+  minBtn.onclick = togglePanel;
+  addEventListener('keydown', e => { if (e.key === 'h' || e.key === 'H') panel.style.display = panel.style.display === 'none' ? '' : 'none'; });
+
+  const dropEl = $('drop');
+  addEventListener('dragover', e => { e.preventDefault(); dropEl.classList.add('on'); });
+  addEventListener('dragleave', e => { if (!e.relatedTarget) dropEl.classList.remove('on'); });
+  addEventListener('drop', e => { e.preventDefault(); dropEl.classList.remove('on'); loadFile(e.dataTransfer.files[0]); });
+  addEventListener('resize', layout);
+
+  /* ---------- 開始 ---------- */
+  if (location.protocol === 'file:') {
+    setStatus('このファイルを直接開くと、カメラ追跡と深度推定が使えません。同じフォルダの start.bat をダブルクリックして起動してください。');
+    $('camBtn').disabled = true;
+  }
+  loadDemo();
+  layout();
+  (function loop(now) {
+    trackFace(now);
+    smooth();
+    render();
+    requestAnimationFrame(loop);
+  })(performance.now());
+})();
+</script>
+</body>
+</html>
