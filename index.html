@@ -512,20 +512,27 @@
 
   async function startCamera() {
     const btn = $('camBtn'); btn.disabled = true;
+    let stream = null;
+    const gone = () => video.srcObject !== stream;   // 準備中に画面を離れて止めた
     try {
       setStatus('カメラの使用を許可してください…');
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: 'user' }, audio: false });
-      video.srcObject = stream; await video.play();
+      stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: 'user' }, audio: false });
+      video.srcObject = stream; lastVideoT = -1;
+      if (document.hidden) { leaveCamera(); return; }   // 許可を待つ間に画面を離れていた
+      await video.play();
+      if (gone()) return;
       video.hidden = !$('showCam').checked;
       setStatus('顔の検出モデルを読み込み中…');
       const V = await import(MP_URL);
       const fileset = await V.FilesetResolver.forVisionTasks(MP_WASM);
       const opts = d => ({ baseOptions: { modelAssetPath: FACE_MODEL, delegate: d }, runningMode: 'VIDEO', numFaces: 1 });
-      landmarker = await V.FaceLandmarker.createFromOptions(fileset, opts('CPU'));
+      if (!landmarker) landmarker = await V.FaceLandmarker.createFromOptions(fileset, opts('CPU'));   // 止めて使い直すときは作り直さない
+      if (gone()) return;
       st.mode = 'camera'; $('centerBtn').disabled = false;
       btn.textContent = 'マウスに戻す'; btn.disabled = false; btn.onclick = stopCamera;
       setStatus('顔を探しています。画面から50cmほど離れて、正面を向いてください。');
     } catch (err) {
+      if (stream && gone()) return;   // 止めたことによる中断。新しく始めたカメラには触らない
       console.error(err);
       releaseCamera();   // 許可のあとで失敗したとき、カメラをつけたままにしない
       btn.disabled = false;
@@ -552,6 +559,16 @@
     const btn = $('camBtn'); btn.textContent = 'カメラで追跡'; btn.onclick = startCamera;
     setStatus('マウスで視点を動かします。');
   }
+  // 別のタブやアプリに移ったら、カメラをつけたままにしない（準備中も止める。戻っても自動では始めない）
+  function leaveCamera() {
+    stopCamera();
+    $('camBtn').disabled = false;
+    $('trackInfo').textContent = '追跡: 停止中';
+    setStatus('画面を離れたので、カメラを止めました。続けるときは「カメラで追跡」を押してください。');
+  }
+  const leaveIfOn = () => { if (video.srcObject) leaveCamera(); };
+  document.addEventListener('visibilitychange', () => { if (document.hidden) leaveIfOn(); });
+  addEventListener('pagehide', leaveIfOn);
   $('camBtn').onclick = startCamera;
 
   function trackFace(now) {
